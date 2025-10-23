@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>OTP Viewer — TOTP visualizer</title>
+  <style>
+    :root{font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;}
+    body{display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f172a;color:#e6eef8}
+    .card{width:min(720px,96vw);background:linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01));padding:20px;border-radius:12px;box-shadow:0 8px 30px rgba(2,6,23,0.6)}
+    h1{margin:0 0 12px 0;font-size:20px}
+    label{display:block;font-size:13px;color:#a7b0c1;margin-top:8px}
+    input[type=text],textarea{width:100%;padding:8px 10px;margin-top:6px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    .row{display:flex;gap:12px;align-items:center}
+    .left{flex:1}
+    .qr{width:160px;height:160px;border-radius:10px;background:#071025;display:flex;align-items:center;justify-content:center}
+    .bigcode{font-family:monospace;font-size:36px;letter-spacing:4px}
+    button{margin-top:8px;padding:8px 12px;border-radius:8px;border:0;background:#06b6d4;color:#022;cursor:pointer}
+    .meta{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
+    .meta span{background:rgba(255,255,255,0.03);padding:6px 8px;border-radius:8px;font-size:13px}
+    .prog{height:8px;width:100%;background:rgba(255,255,255,0.06);border-radius:8px;margin-top:10px;overflow:hidden}
+    .prog > i{display:block;height:100%;background:linear-gradient(90deg,#16a34a,#f59e0b);width:0%}
+    small{color:#9fb0c9}
+    footer{margin-top:12px;font-size:12px;color:#9fb0c9}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>OTP Viewer — TOTP</h1>
+    <div>
+      <label for="otpauth">Cole a URL otpauth:// (ou use a fornecida)</label>
+      <input id="otpauth" type="text" value="otpauth://totp/microsoft:4756694%40almavivadobrasil.com.br?secret=tybfzlvdczjnd5pp&issuer=microsoft" />
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <button id="parseBtn">Gerar</button>
+        <button id="copyBtn">Copiar código</button>
+        <button id="showSecretBtn">Mostrar segredo</button>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:14px;">
+      <div class="left">
+        <div class="bigcode" id="code">------</div>
+        <div class="meta">
+          <span id="issuer">Issuer: —</span>
+          <span id="account">Account: —</span>
+          <span id="algo">Alg: SHA1</span>
+          <span id="digits">Digits: 6</span>
+        </div>
+        <div class="prog" title="Tempo restante">
+          <i id="bar"></i>
+        </div>
+        <footer><small>Atualiza automaticamente (TOTP period = <span id="period">30</span>s)</small></footer>
+      </div>
+      <div style="width:170px;text-align:center">
+        <div class="qr"><img id="qrimg" alt="QR" style="max-width:100%;max-height:100%"/></div>
+        <div style="margin-top:8px;font-size:12px;word-break:break-all"><small id="secretMasked">secret: ••••••</small></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Base32 decoder (RFC4648) — returns Uint8Array
+    function base32ToBytes(base32){
+      const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+      base32 = base32.toUpperCase().replace(/=+$/,'').replace(/[^A-Z2-7]/g,'');
+      const bits = [];
+      for (let i=0;i<base32.length;i++){
+        const val = alphabet.indexOf(base32[i]);
+        for(let j=4;j>=0;j--) bits.push((val>>j)&1);
+      }
+      const bytes = [];
+      for(let i=0;i+8<=bits.length;i+=8){
+        let b=0; for(let j=0;j<8;j++) b=(b<<1)|bits[i+j];
+        bytes.push(b);
+      }
+      return new Uint8Array(bytes);
+    }
+
+    async function hmacSha1(keyBytes, msgBytes){
+      const key = await crypto.subtle.importKey('raw', keyBytes, {name:'HMAC', hash:'SHA-1'}, false, ['sign']);
+      const sig = await crypto.subtle.sign('HMAC', key, msgBytes);
+      return new Uint8Array(sig);
+    }
+
+    function hex(buf){ return Array.from(buf).map(b=>b.toString(16).padStart(2,'0')).join(''); }
+
+    async function totp(secretBase32, opts={digits:6,period:30,algo:'SHA1'}){
+      const secret = base32ToBytes(secretBase32);
+      const period = opts.period||30;
+      const digits = opts.digits||6;
+      const step = Math.floor(Date.now()/1000/period);
+      // 8-byte big-endian
+      const buf = new ArrayBuffer(8);
+      const view = new DataView(buf);
+      // write high 32 bits zero (since step < 2^32 for now), write low
+      view.setUint32(0, Math.floor(step/0x100000000));
+      view.setUint32(4, step >>> 0);
+      const hmac = await hmacSha1(secret, new Uint8Array(buf));
+      const off = hmac[hmac.length-1] & 0x0f;
+      const code = ((hmac[off]&0x7f)<<24) | ((hmac[off+1]&0xff)<<16) | ((hmac[off+2]&0xff)<<8) | (hmac[off+3]&0xff);
+      const otp = (code % (10**digits)).toString().padStart(digits,'0');
+      return {otp, step};
+    }
+
+    function parseOtpauth(url){
+      try{
+        const u = new URL(url);
+        if (u.protocol !== 'otpauth:') throw new Error('Não é otpauth://');
+        const type = u.hostname; // totp or hotp
+        const label = decodeURIComponent(u.pathname.substring(1));
+        const params = Object.fromEntries(u.searchParams.entries());
+        const [issuerFromLabel, account] = label.includes(':') ? label.split(':') : [null,label];
+        return {
+          type, label, account:account || label, issuer: params.issuer || issuerFromLabel || '',
+          secret: params.secret || '', algorithm: (params.algorithm||'SHA1').toUpperCase(), digits: parseInt(params.digits||'6',10), period: parseInt(params.period||'30',10)
+        }
+      }catch(e){
+        return null;
+      }
+    }
+
+    // UI wiring
+    const otpauthInput = document.getElementById('otpauth');
+    const parseBtn = document.getElementById('parseBtn');
+    const codeEl = document.getElementById('code');
+    const issuerEl = document.getElementById('issuer');
+    const accountEl = document.getElementById('account');
+    const algoEl = document.getElementById('algo');
+    const digitsEl = document.getElementById('digits');
+    const periodEl = document.getElementById('period');
+    const bar = document.getElementById('bar');
+    const qrimg = document.getElementById('qrimg');
+    const secretMasked = document.getElementById('secretMasked');
+    const copyBtn = document.getElementById('copyBtn');
+    const showSecretBtn = document.getElementById('showSecretBtn');
+
+    let current = null;
+    let showSecret = false;
+
+    async function refresh(){
+      if(!current) return;
+      try{
+        const now = Date.now();
+        const period = current.period;
+        const secs = Math.floor(now/1000);
+        const passed = secs % period;
+        const remaining = period - passed;
+        // progress percent
+        const pct = Math.round((passed/period)*100);
+        bar.style.width = pct + '%';
+        const res = await totp(current.secret, {digits: current.digits, period: current.period});
+        codeEl.textContent = res.otp;
+        if(showSecret) secretMasked.textContent = 'secret: ' + current.secret;
+        else secretMasked.textContent = 'secret: ••••••';
+      }catch(e){
+        codeEl.textContent = 'erro';
+      }
+    }
+
+    function updateQr(url){
+      try{
+        const enc = encodeURIComponent(url);
+        qrimg.src = `https://chart.googleapis.com/chart?chs=200x200&cht=qr&chl=${enc}&choe=UTF-8`;
+      }catch(e){ qrimg.src = ''; }
+    }
+
+    async function applyUrl(url){
+      const parsed = parseOtpauth(url);
+      if(!parsed){ alert('URL inválida'); return; }
+      current = parsed;
+      issuerEl.textContent = 'Issuer: ' + (parsed.issuer || '-');
+      accountEl.textContent = 'Account: ' + (parsed.account || '-');
+      algoEl.textContent = 'Alg: ' + (parsed.algorithm || 'SHA1');
+      digitsEl.textContent = 'Digits: ' + (parsed.digits || 6);
+      periodEl.textContent = parsed.period || 30;
+      updateQr(url);
+      await refresh();
+    }
+
+    parseBtn.addEventListener('click', ()=>applyUrl(otpauthInput.value.trim()));
+    copyBtn.addEventListener('click', ()=>{
+      const text = codeEl.textContent.trim();
+      if(!text) return;
+      navigator.clipboard.writeText(text).then(()=>{ copyBtn.textContent='Copiado!'; setTimeout(()=>copyBtn.textContent='Copiar código',1200); });
+    });
+    showSecretBtn.addEventListener('click', ()=>{ showSecret = !showSecret; showSecretBtn.textContent = showSecret ? 'Ocultar segredo' : 'Mostrar segredo'; if(current) secretMasked.textContent = showSecret ? ('secret: '+current.secret) : 'secret: ••••••'; });
+
+    // auto-refresh every 1s
+    setInterval(()=> refresh(), 1000);
+
+    // parse on load the default value
+    window.addEventListener('load', ()=>{
+      applyUrl(otpauthInput.value.trim());
+    });
+  </script>
+</body>
+</html>
